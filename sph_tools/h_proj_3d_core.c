@@ -28,8 +28,13 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
+#include <omp.h>
 
 #include "h_proj.h"
+
+static int ceilDiv(int q, int d) {
+ return (q + d - 1)  / d;
+}
 
 void processParticlesInSlice(const double * const r,
                              const double * const phi,
@@ -37,8 +42,8 @@ void processParticlesInSlice(const double * const r,
 		             const size_t L,
 		             const size_t N,
 		             double * const A,
-			     const double z_lo,
-			     const double z_hi);
+			     const int iz_lo,
+			     const int iz_hi);
 
 void h_proj_3d_core(const double * const r,
                     const double * const phi,
@@ -54,79 +59,16 @@ void h_proj_3d_core(const double * const r,
   A[i]=0.0;
  }
 
- double max2h=0.;
- for(i=0;i<N;++i) {
-  if(max2h<h[i]) max2h=h[i];
- }
- size_t Nslices=(size_t)floor((double)L/max2h);
- double sliceWidth=(double)L/(double)(Nslices);
- size_t iSlice;
- switch ( Nslices % 3 ) {
-  case 0:
-  #pragma omp parallel for
-   for(iSlice=1;iSlice<=Nslices-2;iSlice+=3) {
-    double z_lo=(double)(iSlice-1)*sliceWidth;
-    double z_hi=(double)(iSlice  )*sliceWidth;
-    processParticlesInSlice(r,phi,h,L,N,A,z_lo,z_hi);
-   }
-  #pragma omp parallel for
-   for(iSlice=2;iSlice<=Nslices-1;iSlice+=3) {
-    double z_lo=(double)(iSlice-1)*sliceWidth;
-    double z_hi=(double)(iSlice  )*sliceWidth;
-    processParticlesInSlice(r,phi,h,L,N,A,z_lo,z_hi);
-   }
-  #pragma omp parallel for
-   for(iSlice=3;iSlice<=Nslices  ;iSlice+=3) {
-    double z_lo=(double)(iSlice-1)*sliceWidth;
-    double z_hi=(double)(iSlice  )*sliceWidth;
-    processParticlesInSlice(r,phi,h,L,N,A,z_lo,z_hi);
-   }
-   break;
-  case 1:
-  #pragma omp parallel for
-   for(iSlice=1;iSlice<=Nslices  ;iSlice+=3) {
-    double z_lo=(double)(iSlice-1)*sliceWidth;
-    double z_hi=(double)(iSlice  )*sliceWidth;
-    processParticlesInSlice(r,phi,h,L,N,A,z_lo,z_hi);
-   }
-  #pragma omp parallel for
-   for(iSlice=2;iSlice<=Nslices-2;iSlice+=3) {
-    double z_lo=(double)(iSlice-1)*sliceWidth;
-    double z_hi=(double)(iSlice  )*sliceWidth;
-    processParticlesInSlice(r,phi,h,L,N,A,z_lo,z_hi);
-   }
-  #pragma omp parallel for
-   for(iSlice=3;iSlice<=Nslices-1;iSlice+=3) {
-    double z_lo=(double)(iSlice-1)*sliceWidth;
-    double z_hi=(double)(iSlice  )*sliceWidth;
-    processParticlesInSlice(r,phi,h,L,N,A,z_lo,z_hi);
-   }
-   break;
-  case 2:
-  #pragma omp parallel for
-   for(iSlice=1;iSlice<=Nslices-1;iSlice+=3) {
-    double z_lo=(double)(iSlice-1)*sliceWidth;
-    double z_hi=(double)(iSlice  )*sliceWidth;
-    processParticlesInSlice(r,phi,h,L,N,A,z_lo,z_hi);
-   }
-  #pragma omp parallel for
-   for(iSlice=2;iSlice<=Nslices  ;iSlice+=3) {
-    double z_lo=(double)(iSlice-1)*sliceWidth;
-    double z_hi=(double)(iSlice  )*sliceWidth;
-    processParticlesInSlice(r,phi,h,L,N,A,z_lo,z_hi);
-   }
-  #pragma omp parallel for
-   for(iSlice=3;iSlice<=Nslices-2;iSlice+=3) {
-    double z_lo=(double)(iSlice-1)*sliceWidth;
-    double z_hi=(double)(iSlice  )*sliceWidth;
-    processParticlesInSlice(r,phi,h,L,N,A,z_lo,z_hi);
-   }
-   break;
-  default:
-   printf("ERROR: h_proj_3d_core: Impossible state.\n");
-   break;
- }
+ #pragma omp parallel
+ {
+  const int nThreads = omp_get_num_threads();
+  const int myId = omp_get_thread_num();
+  const int cellsPerChunk = ceilDiv((int)L, nThreads);
 
+  const int iz_lo = myId * cellsPerChunk;
+  const int iz_hi = MIN((int)L, (myId + 1) * cellsPerChunk);
+  processParticlesInSlice(r,phi,h,L,N,A,iz_lo,iz_hi);
+ }
 }
 
 
@@ -136,18 +78,21 @@ void processParticlesInSlice(const double * const r,
 		             const size_t L,
 		             const size_t N,
 		             double * const A,
-			     const double z_lo,
-			     const double z_hi)
+			     const int iz_lo,
+			     const int iz_hi)
 {
  /* Loop over all particles */
  size_t i;
+ double z_lo = (double)iz_lo;
+ double z_hi = (double)iz_hi;
  for(i=0;i<N;++i) {
   size_t j = 3*i;
   double z=r[j+2];
-  if( (z >= z_lo) && (z < z_hi) ) {
+  double hi=h[i];
+  double twohi=2.0*hi;
+  if( (z + twohi >= z_lo) && (z - twohi < z_hi) ) {
    double x=r[j+0];
    double y=r[j+1];
-   double hi=h[i];
 
    /* See the Appendix for an explanation of the following line */	     
    double phih3=phi[i]/(hi*hi*hi);
@@ -156,21 +101,24 @@ void processParticlesInSlice(const double * const r,
     size_t iy=(size_t)floor(y);
     size_t iz=(size_t)floor(z);
     size_t index=ix+iy*L+iz*L*L;
-    A[index]=A[index] + phi[i];
+    if (iz >= iz_lo && iz < iz_hi) {
+     A[index]=A[index] + phi[i];
+    }
    } else if (hi<=H_THRESHOLD_FOR_REFINEMENT) {
     /* ****** Refine cells ****** */
-    double twohi=2.0*hi;
 
     /* The limits of cells the particle contributes to.
      * These can be outside the range [0,L-1]. We'll deal with that case when we assign to cells.*/
     int ix_min=(int)floor(x-twohi);
     int iy_min=(int)floor(y-twohi);
     int iz_min=(int)floor(z-twohi);
+    if(iz_min<iz_lo) iz_min=iz_lo;
 
     int ix_max=(int)floor(x+twohi);
     int iy_max=(int)floor(y+twohi);
     int iz_max=(int)floor(z+twohi);
-    
+    if(iz_max>iz_hi-1) iz_max=iz_hi-1;
+
     /* Size of the region the particle spreads itself over */
     size_t x_cell_range=(size_t)(ix_max-ix_min+1);
     size_t y_cell_range=(size_t)(iy_max-iy_min+1);
@@ -200,7 +148,7 @@ void processParticlesInSlice(const double * const r,
     r_ref[1]=(r[j+1]-(double)iy_min)*((double)refinementFactor);
     r_ref[2]=(r[j+2]-(double)iz_min)*((double)refinementFactor);
     /* Iteratively call the routine that does the work */
-    processParticlesInSlice(r_ref,&(phi[i]),&h_ref,L_ref,1,A_ref,r_ref[2]-0.1,r_ref[2]+0.1);
+    processParticlesInSlice(r_ref,&(phi[i]),&h_ref,L_ref,1,A_ref,0,L_ref);
     
     /* Assign the values in the refined grid to the appropriate base grid cells */
     size_t ix_ref,iy_ref,iz_ref;
@@ -229,20 +177,19 @@ void processParticlesInSlice(const double * const r,
     /* Clean up */
     free(A_ref);
    } else {
-    double twohi=2.0*hi;
     int ix_min=(int)floor(x-twohi);
     if(ix_min<0) ix_min=0;
     int iy_min=(int)floor(y-twohi);
     if(iy_min<0) iy_min=0;
     int iz_min=(int)floor(z-twohi);
-    if(iz_min<0) iz_min=0;
+    if(iz_min<iz_lo) iz_min=iz_lo;
 
     int ix_max=(int)floor(x+twohi);
     if(ix_max>(int)(L-1)) ix_max=(int)(L-1);
     int iy_max=(int)floor(y+twohi);
     if(iy_max>(int)(L-1)) iy_max=(int)(L-1);
     int iz_max=(int)floor(z+twohi);
-    if(iz_max>(int)(L-1)) iz_max=(int)(L-1);
+    if(iz_max>iz_hi-1) iz_max=iz_hi-1;
 
     double xPhalf=x-0.5;
     double yPhalf=y-0.5;
